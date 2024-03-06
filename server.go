@@ -3,6 +3,7 @@ package geerpc
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"geerpc/codec"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 )
 
 const MagicNumber = 0x3def5c
@@ -21,13 +23,16 @@ const MagicNumber = 0x3def5c
 // | Option | Header1 | Body1 | Header2 | Body2 | ...
 
 type Option struct {
-	MagicNumber int        // MagicNumber marks this's a geerpc request
-	CodecType   codec.Type // client may choose diff Codec to encode body
+	MagicNumber    int           // MagicNumber marks this's a geerpc request
+	CodecType      codec.Type    // client may choose diff Codec to encode body
+	ConnectTimeout time.Duration // 0 means no limit
+	HandleTimeout  time.Duration
 }
 
 var DefaultOption = &Option{
-	MagicNumber: MagicNumber,
-	CodecType:   codec.GobType,
+	MagicNumber:    MagicNumber,
+	CodecType:      codec.GobType,
+	ConnectTimeout: time.Second * 10,
 }
 
 // Server represents an RPC Server
@@ -112,14 +117,14 @@ func (server *Server) ServerConn(conn io.ReadWriteCloser) {
 		return
 	}
 
-	server.ServerCodec(f(conn))
+	server.ServerCodec(f(conn), opt.ConnectTimeout)
 }
 
 // invalidRequest is a placeholder for response argv when error occurs
 var invalidRequest = struct{}{}
 
 // handle connection
-func (server *Server) ServerCodec(cc codec.Codec) {
+func (server *Server) ServerCodec(cc codec.Codec, timeout time.Duration) {
 	sending := new(sync.Mutex) // make sure to send a complete response, promise data race won't happen
 	wg := new(sync.WaitGroup)  // wait until all request are handled
 	for {
@@ -133,7 +138,7 @@ func (server *Server) ServerCodec(cc codec.Codec) {
 			continue
 		}
 		wg.Add(1)
-		go server.handleRequest(cc, req, sending, wg)
+		go server.handleRequest(cc, req, sending, wg, timeout)
 	}
 	wg.Wait()
 	_ = cc.Close()
@@ -184,15 +189,47 @@ func (server *Server) readRequest(cc codec.Codec) (*request, error) {
 	return req, nil
 }
 
-func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
+/*
+make sure sendRequest() only invoke once.
+
+The whole process is split into two phases: called and sent. Two condition occur:
+1. called channel receive message, represents processing without timeout.
+2. time.After() receive message before called channel, represents timeout, called and sent channel will block, invoke case <-time.After(timeout)'s code.
+*/
+func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
-	err := req.svc.call(req.mType, req.argv, req.replyv)
-	if err != nil {
-		req.h.Error = err.Error()
-		server.sendResponse(cc, req.h, invalidRequest, sending)
+	called := make(chan struct{})
+	sent := make(chan struct{})
+	go func() {
+		err := req.svc.call(req.mType, req.argv, req.replyv)
+		// Sending an empty struct can be thought of as sending a signal, because sizeof that is zero, save memory
+		called <- struct{}{}
+		if err != nil {
+			req.h.Error = err.Error()
+			server.sendResponse(cc, req.h, invalidRequest, sending)
+			sent <- struct{}{}
+			return
+		}
+		server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+		sent <- struct{}{}
+	}()
+
+	if timeout == 0 {
+		// wait the empty struct signal and throw it, then execute the next statement.
+		<-called
+		<-sent
 		return
 	}
-	server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+
+	select {
+	// use time.After() to set a timer, when the set time is over, select will go into this case.
+	case <-time.After(timeout):
+		req.h.Error = fmt.Sprintf("rpc server: request handle timeout: expect within %s", timeout)
+		server.sendResponse(cc, req.h, invalidRequest, sending)
+	// if called channel get message early than time.After(), function will wait sent channel's message to return.
+	case <-called:
+		<-sent
+	}
 }
 
 func (server *Server) sendResponse(cc codec.Codec, h *codec.Header, body interface{}, sending *sync.Mutex) {

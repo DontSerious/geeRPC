@@ -4,8 +4,6 @@ import (
 	"geerpc"
 	"log"
 	"net"
-	"sync"
-	"time"
 )
 
 type Foo int
@@ -33,29 +31,29 @@ func startServer(addr chan string) {
 	geerpc.Accept(l)
 }
 
-func main() {
-	log.SetFlags(0)
-	addr := make(chan string)
-	go startServer(addr)
-	client, _ := geerpc.Dial("tcp", <-addr)
-	defer func() { _ = client.Close() }()
+// func main() {
+// 	log.SetFlags(0)
+// 	addr := make(chan string)
+// 	go startServer(addr)
+// 	client, _ := geerpc.Dial("tcp", <-addr)
+// 	defer func() { _ = client.Close() }()
 
-	time.Sleep(time.Second)
-	var wg sync.WaitGroup
-	for i := range 5 {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			args := &Args{Num1: i, Num2: i * i}
-			var reply int
-			if err := client.Call("Foo.Sum", args, &reply); err != nil {
-				log.Fatal("call Foo.Sum error:", err)
-			}
-			log.Printf("%d + %d = %d", args.Num1, args.Num2, reply)
-		}(i)
-		wg.Wait()
-	}
-}
+// 	time.Sleep(time.Second)
+// 	var wg sync.WaitGroup
+// 	for i := range 5 {
+// 		wg.Add(1)
+// 		go func(i int) {
+// 			defer wg.Done()
+// 			args := &Args{Num1: i, Num2: i * i}
+// 			var reply int
+// 			if err := client.Call("Foo.Sum", args, &reply); err != nil {
+// 				log.Fatal("call Foo.Sum error:", err)
+// 			}
+// 			log.Printf("%d + %d = %d", args.Num1, args.Num2, reply)
+// 		}(i)
+// 		wg.Wait()
+// 	}
+// }
 
 // day 1
 // func main() {
