@@ -78,8 +78,9 @@ func (d *MultiServiceDiscovery) Get(mode SelectMode) (string, error) {
 }
 
 func (d *MultiServiceDiscovery) GetAll() ([]string, error) {
+	// RLock(): Multiple go routines can be read (not written) simultaneously by acquiring a lock.
 	d.mu.RLock()
-	defer d.mu.Unlock()
+	defer d.mu.RUnlock()
 
 	// return a copy of d.servers
 	servers := make([]string, len(d.servers))
